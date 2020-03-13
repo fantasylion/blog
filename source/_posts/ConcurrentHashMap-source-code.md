@@ -105,17 +105,10 @@ tags: [source]
 
 那 ConcurrentHashMap 是如何处理这个问题的。这里 ConcurrentHashMap 设置了一个 int 类型的属性 sizeCtl ，用于判断是否有其他线程在执行扩容或者初始化等调整大小的操作。先看下 sizeCtl 的注释：
 
- > Table initialization and resizing control.  When negative, the
- > table is being initialized or resized: -1 for initialization,
- > else -(1 + the number of active resizing threads).  Otherwise,
- > when table is null, holds the initial table size to use upon
- > creation, or 0 for default. After initialization, holds the
- > next element count value upon which to resize the table.
+ > Table initialization and resizing control.  When negative, the table is being initialized or resized: -1 for initialization,  else -(1 + the number of active resizing threads).  Otherwise, when table is null, holds the initial table size to use upon creation, or 0 for default. After initialization, holds the next element count value upon which to resize the table.
 
 大致意思是
- > 表初始化和大小调整控制。如果为负，则表将被初始化或调整大小：-1用于初始化，
- > -（1 +活动的调整大小线程数）表示调整大小。否则，当table为null时，保留创建时要使用的初始表大小，
- > 或者默认为0。 初始化之后，保留下一个要调整表大小的元素计数值。
+ > 表初始化和大小调整控制。如果为负，则表将被初始化或调整大小：-1用于初始化， -（1 +活动的调整大小线程数）表示调整大小。否则，当table为null时，保留创建时要使用的初始表大小， 或者默认为0。 初始化之后，保留下一个要调整表大小的元素计数值。
  
  代码中实现的逻辑是 siezeCtl 小于 0 的时候（也就是有其他线程对数组执行初始化或者调整大小），放弃 CPU 执行本线程，等待下次本线程抢到执行权（到时候在看还有没有其他线程在执行）
  
@@ -167,15 +160,14 @@ U.compareAndSwapObject(tab, ((long)i << ASHIFT) + ABASE, c, v);
 
 * 一种是在新增节点后等到数组元素超过了装载系数0.75（也就是装满75%）后就会立即进行扩容
 * 另一种是链表转换为红黑树时，如果数组长度没超过 64，将不会转换为红黑树而是进行扩容重新调整节点位置
-
-
-
-
-
-
+  
+<br/>
+<br/>
+<br/>
+  
 __参考资料__：
 
-cmpxchg：[http://heather.cs.ucdavis.edu/~matloff/50/PLN/lock.pdf](http://heather.cs.ucdavis.edu/~matloff/50/PLN/lock.pdf)<br>
-CAS1：[https://juejin.im/post/5a73cbbff265da4e807783f5](https://juejin.im/post/5a73cbbff265da4e807783f5)<br>
-CAS2：[https://liuzhengyang.github.io/2017/05/11/cas/](https://liuzhengyang.github.io/2017/05/11/cas/)<br>
-CAS3：[https://zhuanlan.zhihu.com/p/34556594](https://zhuanlan.zhihu.com/p/34556594)<br>
+cmpxchg：[http://heather.cs.ucdavis.edu/~matloff/50/PLN/lock.pdf](http://heather.cs.ucdavis.edu/~matloff/50/PLN/lock.pdf)  
+CAS1：[https://juejin.im/post/5a73cbbff265da4e807783f5](https://juejin.im/post/5a73cbbff265da4e807783f5)  
+CAS2：[https://liuzhengyang.github.io/2017/05/11/cas/](https://liuzhengyang.github.io/2017/05/11/cas/)  
+CAS3：[https://zhuanlan.zhihu.com/p/34556594](https://zhuanlan.zhihu.com/p/34556594)  
