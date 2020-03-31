@@ -82,7 +82,7 @@ tags: [source]
             }
         }
 
-        addCount(1L, binCount);								// 判断是否需要扩容
+        addCount(1L, binCount);								// 元素计数并判断是否需要扩容
         
         return null;
     }
@@ -160,13 +160,402 @@ U.compareAndSwapObject(tab, ((long)i << ASHIFT) + ABASE, c, v);
 
 * 一种是在新增节点后等到数组元素超过了装载系数0.75（也就是装满75%）后就会立即进行扩容
 * 另一种是链表转换为红黑树时，如果数组长度没超过 64，将不会转换为红黑树而是进行扩容重新调整节点位置
+
+以下为计数时候扩容代码加注释
+
+```java
+	/**
+     * Adds to count, and if table is too small and not already
+     * resizing, initiates transfer. If already resizing, helps
+     * perform transfer if work is available.  Rechecks occupancy
+     * after a transfer to see if another resize is already needed
+     * because resizings are lagging additions.
+     *
+     * @param x the count to add
+     * @param check if <0, don't check resize, if <= 1 only check if uncontended
+     * 默认为 0 ， 节点已经存在一个元素时 1表示元素 hash 大于等于0，2 表示存在红黑树
+     */
+    private final void addCount(long x, int check) {
+        CounterCell[] as;	// 计数器集合，非空的时候是大小2的幂次方
+		// baseCount, Base counter value, used mainly when there is no contention, 
+        // but also as a fallback during table initialization races. Updated via CAS.
+        long b；				// baseCount
+        long s;				// 元素的总数
+
+        // as 非空说明出现过竞争（需要找到自己线程的计数器进行计数）
+        // 计数器 +x 失败说明存在赋值竞争（需要通过计数器集合计数）
+        if ( (as = counterCells) != null || !U.compareAndSwapLong(this, BASECOUNT, b = baseCount, s = b + x) ) {
+
+            CounterCell a; // 计数器
+            long v;	  	   // 当前线程的从 as 中随机取出的值
+            int  m;	       // as 的最大下标
+            boolean uncontended = true;
+
+            // 如果计数器数组是空的，需要初始化计数器数组
+            if (as == null || (m = as.length - 1) < 0 ||
+            	// 当前线程的计数（probe每个线程独享，类似于hash的作用用于寻址）如果是空的，需要初始化
+                (a = as[ThreadLocalRandom.getProbe() & m]) == null ||
+                // 通过CAS给计数器 +x 如果失败需要进入
+                !(uncontended =
+                  U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))) {	// 给cellvalue赋值
+                fullAddCount(x, uncontended);
+                return;
+            }
+            if (check <= 1)
+                return;
+            // 统计计数
+            s = sumCount();
+        }
+
+        // 是否需要扩容
+	    if (check >= 0) {
+	        Node<K,V>[] tab, nt;
+	        // 表长度
+	        int n;
+			
+			// sizeCtrl
+	        int sc;
+	        // sizeCtl
+	        //  -1 表示在初始化 
+	        //  -(1+在扩容的线程数) 表示在扩容
+	        //  如果表是 null, sizeCtl 的值就表示需要初始化的大小，默认是 0
+	        //  在初始化完成之后，sizeCtl 的值则表示下一个扩容的阈值（n-(n >>> 2) 等于 n * 0.75 向上取整
+
+	        // 元素总数超过 sizeCtrl，并且表不为Null并且 表的长度没超过最大容量
+	        while (s >= (long)(sc = sizeCtl) && (tab = table) != null &&
+	               (n = tab.length) < MAXIMUM_CAPACITY) {
+	            int rs = resizeStamp(n);
+	        	// 负数表示在初始化（-1）或者在扩容（-1 + -number of Threads）, 这里判断是否有其他线程正在进行扩容
+	            if (sc < 0) {
+	            	// 判断扩容是否结束，结束则中断循环
+	                if ((sc >>> RESIZE_STAMP_SHIFT) != rs || sc == rs + 1 ||
+	                    sc == rs + MAX_RESIZERS || (nt = nextTable) == null ||
+	                    transferIndex <= 0)
+	                    break;
+	                // sizeCtrl +1 表示扩容线程 +1
+	                if (U.compareAndSwapInt(this, SIZECTL, sc, sc + 1))
+	                    transfer(tab, nt);
+	            // 触发扩容（第一个扩容的线程）
+	            // 高16位是一个对n的数据校验的标志位，低16位表示参与扩容操作的线程个数 + 1。
+	            } else if (U.compareAndSwapInt(this, SIZECTL, sc,
+	                                         (rs << RESIZE_STAMP_SHIFT) + 2)) {
+	                transfer(tab, null);
+	            }
+	            // 统计元素总数
+	            s = sumCount();
+	        }
+	    }
+    }
+        
+    private final void fullAddCount(long x, boolean wasUncontended) {
+        int h;
+        if ((h = ThreadLocalRandom.getProbe()) == 0) {
+            ThreadLocalRandom.localInit();      // force initialization
+            h = ThreadLocalRandom.getProbe();
+            wasUncontended = true;
+        }
+
+        boolean collide = false;                // True if last slot nonempty
+        for (;;) {
+            CounterCell[] as; // 计数器数组
+            CounterCell a;     
+            int n;            // 计数器数组长度
+            long v;
+            // 计数器数组不为空，已经初始化过了（存在以下两种情况）
+            // 一、最开始没初始化，当前线程进来一瞬间被其他线程初始化了
+            // 二、已经初始化了，但是在上一步当前线程给自己在计数器数组中的值加X时候有冲突导致失败了
+            if ((as = counterCells) != null && (n = as.length) > 0) {
+                // 当前线程在计数器数组中没有值
+                if ((a = as[(n - 1) & h]) == null) {
+                    // 查看锁状态是否被锁住，（cellsBusy 是在计数器数组扩容或者创建计数器时用的锁）
+                    if (cellsBusy == 0) {            // Try to attach new Cell
+                        CounterCell r = new CounterCell(x); // Optimistic create
+                        // 给 cellsBusy 上锁，准备初始化计数器
+                        if (cellsBusy == 0 &&
+                            U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+                            boolean created = false;
+                            try {               // Recheck under lock
+                                CounterCell[] rs; int m, j;
+                                // 进入到锁里面后，重新检查下计数器数组，确保当前线程计数器没有初始化过
+                                if ((rs = counterCells) != null &&
+                                    (m = rs.length) > 0 &&
+                                    rs[j = (m - 1) & h] == null) {
+                                    // 初始化当前线程的计数器
+                                    rs[j] = r;  
+                                    created = true;
+                                }
+                            } finally {
+                                // 释放锁
+                                cellsBusy = 0;
+                            }
+                            // 如果线程成功初始化计数器，则结束，否则继续回头起点重新初始化计数器
+                            if (created)
+                                break;
+                            continue;           // Slot is now non-empty
+                        }
+                    }
+                    collide = false;
+                }
+                else if (!wasUncontended)       // CAS already known to fail
+                    wasUncontended = true;      // Continue after rehash
+                // 当前线程在计数器数组中有值，直接通过 cas 加x
+                else if (U.compareAndSwapLong(a, CELLVALUE, v = a.value, v + x))
+                    break;
+                // 当前计数器数组长度超过了 CPU 的数量，或者计数器被修改了
+                else if (counterCells != as || n >= NCPU)
+                    collide = false;            // At max size or stale
+                else if (!collide)
+                    collide = true;
+                // 对计数器数组进行扩容
+                else if (cellsBusy == 0 &&
+                         U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+                    try {
+                        if (counterCells == as) {// Expand table unless stale
+                            CounterCell[] rs = new CounterCell[n << 1];
+                            for (int i = 0; i < n; ++i)
+                                rs[i] = as[i];
+                            counterCells = rs;
+                        }
+                    } finally {
+                        cellsBusy = 0;
+                    }
+                    collide = false;
+                    continue;                   // Retry with expanded table
+                }
+                // 重新计算hash
+                h = ThreadLocalRandom.advanceProbe(h);
+            }
+            // 计数器数组没被初始化过，通过cellsBusy 上锁 准备开始初始化计数器数组
+            else if (cellsBusy == 0 && counterCells == as &&
+                     U.compareAndSwapInt(this, CELLSBUSY, 0, 1)) {
+                boolean init = false;
+                try {                           // Initialize table
+                    if (counterCells == as) {
+                        CounterCell[] rs = new CounterCell[2];
+                        rs[h & 1] = new CounterCell(x);
+                        counterCells = rs;
+                        init = true;
+                    }
+                } finally {
+                    cellsBusy = 0;
+                }
+                if (init)
+                    break;
+            }
+            // 初始化计数器数组上锁失败，尝试直接在 basecount 中计数
+            else if (U.compareAndSwapLong(this, BASECOUNT, v = baseCount, v + x))
+                break;                          // Fall back on using base
+        }
+    }
+    
+    /**
+     * Moves and/or copies the nodes in each bin to new table. See
+     * above for explanation.
+     */
+    private final void transfer(Node<K,V>[] tab, Node<K,V>[] nextTab) {
+        int n = tab.length;		 // 原表长度
+        int stride;				 // 一次操作多少条数据
+        
+        // 根据 CPU 数量来划分一次操作多少条数据，最小是 16 条
+        if ((stride = (NCPU > 1) ? (n >>> 3) / NCPU : n) < MIN_TRANSFER_STRIDE)	// MIN_TRANSFER_STRIDE = 16 
+            stride = MIN_TRANSFER_STRIDE; // subdivide range
+
+        if (nextTab == null) {            // initiating
+            try {
+                @SuppressWarnings("unchecked")
+                // n << 1 就是 n * 2，表示原来的两倍
+                Node<K,V>[] nt = (Node<K,V>[])new Node<?,?>[n << 1];
+                nextTab = nt;
+            } catch (Throwable ex) {      // try to cope with OOME
+                sizeCtl = Integer.MAX_VALUE;
+                return;
+            }
+            nextTable = nextTab;
+            transferIndex = n;	// 一直指向最小边界
+        }
+        int nextn = nextTab.length;
+        // A node inserted at head of bins during transfer operations.
+        ForwardingNode<K,V> fwd = new ForwardingNode<K,V>(nextTab);
+        boolean advance = true;
+        boolean finishing = false; // to ensure sweep before committing nextTab
+
+        // i 指向最大边界 bound 指向最小边界
+        for (int i = 0, bound = 0;;) {
+            Node<K,V> f; int fh;
+            
+            // 给当前线程分配任务（移动指针指向一个操作范围）
+            while (advance) {
+                int nextIndex; // 过度用的临时存储变量
+                int nextBound; // 
+                // --i >= bound 表示 或者 任务已经完成
+                if (--i >= bound || finishing) {
+                    advance = false;
+
+                // 一个任务的指针如果小于0 表示任务分配完毕
+                } else if ((nextIndex = transferIndex) <= 0) {
+                    i = -1;
+                    advance = false;
+                // 分配下一个迁移任务范围
+                } else if (U.compareAndSwapInt(this, TRANSFERINDEX, nextIndex, 
+                	nextBound = (nextIndex > stride ? nextIndex - stride : 0))) {
+
+                    bound = nextBound;
+                    i = nextIndex - 1;
+                    advance = false;
+                }
+            }
+
+            // i < 0 任务完成
+            // i >= n 任务完成后
+            // i + n >= nextn 任务完成后
+            if (i < 0 || i >= n || i + n >= nextn) {
+                int sc;
+                // 如果所有任务都已经完成，重置数据
+                if (finishing) {
+                    nextTable = null;
+                    table = nextTab;
+                    // 设置下一个阈值
+                    sizeCtl = (n << 1) - (n >>> 1);
+                    return;
+                }
+                // 当前线程数减一
+                if (U.compareAndSwapInt(this, SIZECTL, sc = sizeCtl, sc - 1)) {
+
+                    if ((sc - 2) != resizeStamp(n) << RESIZE_STAMP_SHIFT)
+                        return;
+                    finishing = advance = true;
+                    i = n; // recheck before commit
+                }
+            }
+            // 如果i (最大边界) 的值是空的不需要迁移，直接插入 forwardNode 告知其他线程这块已经处理过了
+            else if ((f = tabAt(tab, i)) == null)
+                advance = casTabAt(tab, i, null, fwd);
+            // 数据已经拷贝到新表中
+            else if ((fh = f.hash) == MOVED)
+                advance = true; // already processed
+            else {
+            	// f 节点加锁
+                synchronized (f) {
+                	// 加锁后再次确认数据没有被修改过
+                    if (tabAt(tab, i) == f) {
+                        Node<K,V> ln; // 用来存放保留原位置的链表
+                        Node<K,V> hn; // 用来存放迁移到 原位置+n 的链表
+                        // 节点 hash code 不为负数表示为链表
+                        if (fh >= 0) {
+                        	// fh 为需要迁移节点hash, n 为原表长度
+                        	// f 为需要迁移起始节点
+                        	
+                        	// hash & n 只会计算出 n 或者 0 值
+                        	// n 为原表长度为2的幂次方，所以二进制肯定是 一个1后面带几个零，如16： 10000
+                        	// 任何值 & 上 10000 只会有两个结果 10000 或者 0
+                        	// 计算结果为n的，直接迁移到 原位置index + n 的位置
+                        	// 计算结果为0的，保留在原位置
+                        	// 为什么这么做呢？后面在讲...
+                            int runBit = fh & n;
+                            Node<K,V> lastRun = f;
+
+                            // 循环遍历找到链表最后几个连续的同一类型节点（都保留原位置的或者都要迁移到 原位置+n 的节点）
+                            for (Node<K,V> p = f.next; p != null; p = p.next) {
+                                int b = p.hash & n;
+                                // 找到链表最后几个连续同一类型节点中的头节点
+                                if (b != runBit) {
+                                    runBit = b;
+                                    lastRun = p;
+                                }
+                            }
+                            // 如果本次找到的连续节点是保留原位置的放到 ln 链表
+                            if (runBit == 0) {
+                                ln = lastRun;
+                                hn = null;
+                            }
+                            // 如果本次找到的连续节点是迁移到 原位置+n 位置的放到 hn 链表
+                            else {
+                                hn = lastRun;
+                                ln = null;
+                            }
+
+                            // 继续把其他的节点进行分类
+                            // 保留原位置的插入到 ln 链表起始位置
+                            // 迁移到 原位置+n 的插入到 hn 链表起始位置
+                            // 这里都是插入到起始位置，所以链表不会跟 1.7 jdk 一样发生链表倒置问题
+                            for (Node<K,V> p = f; p != lastRun; p = p.next) {
+                                int ph = p.hash;
+                                K pk = p.key;
+                                V pv = p.val;
+
+                                if ((ph & n) == 0)
+                                    ln = new Node<K,V>(ph, pk, pv, ln);
+                                else
+                                    hn = new Node<K,V>(ph, pk, pv, hn);
+                            }
+
+                            // 迁移数据
+                            setTabAt(nextTab, i, ln);
+                            setTabAt(nextTab, i + n, hn);
+                            // 原表原位置插上 forwardNode 节点表示已经迁移完毕
+                            setTabAt(tab, i, fwd);
+                            advance = true;
+                        }
+                        // 如果已经被转成红黑树了
+                        else if (f instanceof TreeBin) {
+                            TreeBin<K,V> t = (TreeBin<K,V>)f;			// 需要迁移的节点，转成树类型
+                            TreeNode<K,V> lo = null, loTail = null;		// 
+                            TreeNode<K,V> hi = null, hiTail = null;		// 
+                            int lc = 0, hc = 0;
+                            
+                            // TreeNode 本身也就是链表
+                            // 跟链表一样先分成两类，然后一起迁移
+                            for (Node<K,V> e = t.first; e != null; e = e.next) {
+                                int h = e.hash;
+                                TreeNode<K,V> p = new TreeNode<K,V>(h, e.key, e.val, null, null);
+
+                                // 保持原位节点
+                                if ((h & n) == 0) {
+                                    if ((p.prev = loTail) == null)
+                                        lo = p;
+                                    else
+                                        loTail.next = p;
+                                    loTail = p;
+                                    ++lc;
+                                }
+                                // 迁移到 原位+n 节点
+                                else {
+                                    if ((p.prev = hiTail) == null)
+                                        hi = p;
+                                    else
+                                        hiTail.next = p;
+                                    hiTail = p;
+                                    ++hc;
+                                }
+                            }
+
+							// 元素数量没有超过6，退化成链表
+                            ln = (lc <= UNTREEIFY_THRESHOLD) ? untreeify(lo) :
+                            	// new TreeBin<K,V>(lo) 会把lo TreeNode 链表重新构建成一个新的红黑树
+                                (hc != 0) ? new TreeBin<K,V>(lo) : t;			
+                            hn = (hc <= UNTREEIFY_THRESHOLD) ? untreeify(hi) :
+                                (lc != 0) ? new TreeBin<K,V>(hi) : t;
+
+                            setTabAt(nextTab, i, ln);
+                            setTabAt(nextTab, i + n, hn);
+                            setTabAt(tab, i, fwd);
+                            advance = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+```
+
   
 <br/>
 <br/>
 <br/>
   
 __参考资料__：
-
+ConcurrentHashMap: [https://www.cnblogs.com/zyrblog/p/9881958.html](https://www.cnblogs.com/zyrblog/p/9881958.html)  
+Map: [https://sylvanassun.github.io/2018/03/16/2018-03-16-map_family/#more](https://sylvanassun.github.io/2018/03/16/2018-03-16-map_family/#more)  
 cmpxchg：[http://heather.cs.ucdavis.edu/~matloff/50/PLN/lock.pdf](http://heather.cs.ucdavis.edu/~matloff/50/PLN/lock.pdf)  
 CAS1：[https://juejin.im/post/5a73cbbff265da4e807783f5](https://juejin.im/post/5a73cbbff265da4e807783f5)  
 CAS2：[https://liuzhengyang.github.io/2017/05/11/cas/](https://liuzhengyang.github.io/2017/05/11/cas/)  
